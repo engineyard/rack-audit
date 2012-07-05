@@ -2,6 +2,7 @@
 require 'thread'
 require 'net/http'
 require 'uri'
+require 'logger'
 
 # gems
 require 'rack'
@@ -9,81 +10,80 @@ require 'uuidtools'
 require 'multi_json'
 
 class Rack::Audit
-  attr_reader :queue, :host, :port, :name
-  def initialize(app, name, uri)
-    @app   = app
-    @queue = Queue.new
-    @uri   = URI(uri)
-    @host  = @uri.host
-    @port  = @uri.port
-    @name  = name
+  attr_reader :queue, :host, :port, :name, :url
+
+  def initialize(app, name, url, options={})
+    @app, @name, @url = app, name, url
+    @queue  = Queue.new
+    @logger = options[:logger] || Logger.new(STDOUT)
 
     @consumer = Thread.new do
-      while true do
-        body = @queue.pop
+      loop do
+        body = self.queue.pop
         begin
-          post(@uri, body)
+          post(body)
         rescue => e
-          STDERR.puts e.inspect
+          self.logger.error("#{e.inspect}\n#{e.backtrace.join("\n\t")}")
         end
       end
     end
   end
 
   def call(env)
-    uuid = UUIDTools::UUID.random_create.to_s
-    log_request(uuid, env)
+    id = UUIDTools::UUID.random_create.to_s
+    log_request(id, env)
     response = @app.call(env)
-    log_response(uuid, response)
+    log_response(id, response)
     response
   end
 
   private
 
-  def log_request(uuid, env)
+  def log_request(id, env)
     request          = Rack::Request.new(env)
     loggable_request = {
       :request_method => request.request_method,
       :url            => request.url,
       :params         => request.params,
-      :headers        => Rack::Utils::HeaderHash.new(env).to_hash,
+      :body           => request.body.read,
+      :headers        => env.inject({}) do |r,(k,v)|
+        k.match(/^HTTP_/) ? r.merge(k.gsub("HTTP_") => v) : r
+      end,
     }
 
-    # FIXME: necessary?
     request.body.rewind
 
     queue << MultiJson.encode(
-      :uuid    => uuid,
+      :id      => id,
       :request => loggable_request,
       :time    => Time.new.to_i,
-      :from    => name
+      :from    => self.name,
     )
-  rescue => e
-    STDERR.puts e.inspect
-  ensure
-    true
   end
 
-  def log_response(uuid, response)
+  def log_response(id, response)
     status, headers, body = response
     full_body = ''
     body.each { |b| full_body += b.to_s; b.rewind if b.respond_to?(:rewind) }
-    queue << MultiJson.encode(
-      :uuid     => uuid,
+    self.queue << MultiJson.encode(
+      :id       => id,
       :response => [status, headers, full_body],
       :time     => Time.new.to_i,
-      :from     => name
+      :from     => self.name,
     )
-  rescue => e
-    STDERR.puts e.inspect
-  ensure
-    true
   end
 
-  def post(uri, body)
-    req = Net::HTTP::Post.new(uri.to_s)
-    req["content-type"] = "application/json"
-    req.body = body
-    Net::HTTP.start(host, port){|http| http.request(req)}
+  def post(body)
+    uri = URI.parse(self.url)
+    host, port = uri.host, uri.port
+
+    http = Net::HTTP.new(uri.host, uri.port)
+    http.use_ssl= (uri.port == 443)
+
+    request = Net::HTTP::Post.new(uri.to_s)
+    request["Content-Type"]= "application/json"
+    request.body= body
+
+    http.request(request)
   end
 end
