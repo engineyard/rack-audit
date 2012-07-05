@@ -18,7 +18,7 @@ Or install it yourself as:
 
 ## Releasing
 
-    gem bump -trv patch --key engineyard --host http://rubygems.engineyard.com
+    gem bump -trv patch
 
 ## Usage
 
